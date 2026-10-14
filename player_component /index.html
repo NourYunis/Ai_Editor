@@ -1,204 +1,161 @@
 <!doctype html>
 <html><head><meta charset="utf-8">
 <style>
-  body{margin:0;font-family:system-ui,"Segoe UI",Arial,sans-serif;background:#fff;color:#1d2433}
-  #w{padding:8px;border:1px solid #d9dee8;border-radius:10px}
-  #tb{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
-  button{padding:5px 10px;border:1px solid #c5ccd9;border-radius:6px;background:#fff;cursor:pointer;font-size:13px}
-  button:hover{background:#eef2fa}
-  button.danger{border-color:#e5384f;color:#b3162d}
-  button.primary{background:#2457d6;color:#fff;border-color:#2457d6}
-  canvas{width:100%;height:230px;display:block;border-radius:6px;cursor:crosshair}
-  #pan{width:100%;margin:6px 0 0}
-  #info{font-size:13px;color:#44506a;margin-top:6px;display:flex;gap:18px;flex-wrap:wrap}
+  body{margin:0;font-family:system-ui,"Segoe UI",Tahoma,Arial,sans-serif;background:#fff;color:#1d2433}
+  #wrap{padding:8px;border:1px solid #d9dee8;border-radius:10px}
+  canvas{width:100%;height:80px;display:block;background:#f6f8fb;border-radius:6px;cursor:pointer}
+  audio{width:100%;margin-top:6px}
+  #bar{display:flex;gap:8px;align-items:center;margin:6px 0;font-size:14px}
+  #bar button,#bar select{padding:4px 10px;border:1px solid #c5ccd9;border-radius:6px;background:#fff;cursor:pointer}
+  #hint{margin-left:auto;color:#6b7589;font-size:12px}
+  #tx{position:relative;height:470px;overflow-y:auto;border-top:1px solid #e3e7ef}
+  .seg{padding:6px 10px;font-size:21px;line-height:1.9;border-bottom:1px solid #f0f2f6}
+  .seg.cur{background:#eaf2ff}
+  .seg.selseg{background:#fff4d6;box-shadow:inset 4px 0 0 #ffb300}
+  .idx{font-size:12px;background:#e8ecf4;color:#44506a;border-radius:10px;padding:1px 8px;margin:0 6px;cursor:pointer;user-select:none}
+  .seg.chg .idx{background:#d3f2da;color:#17632b}
+  .seg.pend .idx{background:#ffe9a8;color:#7a5200}
+  .idx:hover{background:#cfd8ea}
+  .w{cursor:pointer;border-radius:4px;padding:0 2px}
+  .w:hover{background:#ffe08a}
+  .w.selw{background:#ffb300;color:#000}
 </style></head>
-<body tabindex="0"><div id="w">
-  <div id="tb">
-    <button id="bPlay">▶ Play / Pause</button><button id="bStop">⏹</button>
-    <button id="bPlaySel">▶ Play selection</button>
-    <button id="bDel" class="danger">🗑 Delete selection</button>
-    <button id="bTrim">✂ Keep only selection</button>
-    <button id="bAll">Select all</button>
-    <button id="bUndo">↩ Undo</button><button id="bRedo">↪ Redo</button>
-    <button id="bZin">＋</button><button id="bZout">－</button>
-    <button id="bZsel">Zoom to selection</button><button id="bFit">Fit</button>
-    <button id="bApply" class="primary">✔ Apply edits</button>
+<body><div id="wrap">
+  <canvas id="wave" height="80"></canvas>
+  <audio id="au" controls></audio>
+  <div id="bar">
+    <button id="prev">⏮ Sentence</button><button id="next">Sentence ⏭</button>
+    <select id="spd"><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option></select>
+    <label><input type="checkbox" id="follow" checked> Follow playback</label>
+    <span id="diag" style="color:#b3162d"></span><span id="hint">Click a word = select it · double-click = play sentence · ▶ number = play sentence</span>
   </div>
-  <canvas id="cv" height="230"></canvas>
-  <input type="range" id="pan" min="0" max="1000" value="0">
-  <div id="info"><span id="iDur"></span><span id="iSel"></span><span id="iEd"></span></div>
+  <div id="tx"></div>
 </div>
 <script>
 const $ = id => document.getElementById(id);
-const post = (type, x) => window.parent.postMessage(Object.assign({isStreamlitMessage: true, type}, x || {}), "*");
-const cv = $("cv"), g = cv.getContext("2d"), off = document.createElement("canvas");
-let orig = null, data = null, sr = 16000, ops = [], redo = [], applied = 0, ver = null;
-let view = [0, 1], sel = null, cursor = 0, playing = null, offDirty = true, drag = null, ac = null;
+const au = $("au"), cv = $("wave"), tx = $("tx"), g = cv.getContext("2d");
+let DUR = 1, K = 1, segs = [], segKey = "", ver = null, peaks = null, cur = -1, selI = -1, resumeT = 0, resumePlay = false;
+const post = (type, extra) => window.parent.postMessage(Object.assign({isStreamlitMessage: true, type}, extra || {}), "*");
 
-const dur = () => data ? data.length / sr : 0;
-const fmt = t => { const m = Math.floor(t / 60), s = t - m * 60; return m + ":" + (s < 10 ? "0" : "") + s.toFixed(2); };
-const toT = x => view[0] + x / cv.clientWidth * (view[1] - view[0]);
-const toX = t => (t - view[0]) / (view[1] - view[0]) * cv.clientWidth;
-const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+function build() {
+  const keep = tx.scrollTop;
+  tx.innerHTML = ""; selI = -1; cur = -1;
+  segs.forEach((s, i) => {
+    const d = document.createElement("div");
+    d.className = "seg" + (s.pend ? " pend" : "") + (s.chg ? " chg" : ""); d.id = "s" + i; d.dir = "auto";
+    const b = document.createElement("span");
+    b.className = "idx"; b.textContent = (s.pend ? "⏳ " : s.chg ? "✎ " : "▶ ") + (s.id + 1); b.dataset.i = i; d.appendChild(b);
+    s.text.split(/\s+/).filter(Boolean).forEach((w, k) => {
+      const sp = document.createElement("span");
+      sp.className = "w"; sp.textContent = w; sp.dataset.i = i; sp.dataset.k = k;
+      d.appendChild(sp); d.appendChild(document.createTextNode(" "));
+    });
+    tx.appendChild(d);
+  });
+  tx.scrollTop = keep;
+}
 
-function applyOps(src, list) {
-  let cur = src;
-  for (const [a, b] of list) {
-    const ia = clamp(Math.round(a * sr / 1000), 0, cur.length), ib = clamp(Math.round(b * sr / 1000), 0, cur.length);
-    if (ib <= ia) continue;
-    const out = new Float32Array(cur.length - (ib - ia));
-    out.set(cur.subarray(0, ia), 0); out.set(cur.subarray(ib), ia);
-    cur = out;
-  }
-  return cur;
+function select(i, k, word) {
+  document.querySelectorAll(".selseg").forEach(e => e.classList.remove("selseg"));
+  document.querySelectorAll(".selw").forEach(e => e.classList.remove("selw"));
+  selI = i;
+  $("s" + i).classList.add("selseg");
+  if (k !== null) tx.querySelector(`.w[data-i="${i}"][data-k="${k}"]`).classList.add("selw");
+  post("streamlit:setComponentValue", {dataType: "json",
+       value: {sid: segs[i].id, wi: k, word: word, n: Date.now()}});
 }
-function rebuild(keepView) {
-  stopPlay();
-  data = applyOps(orig, ops); sel = null;
-  cursor = clamp(cursor, 0, dur());
-  if (!keepView) view = [0, Math.max(dur(), 0.1)];
-  else { const len = Math.min(view[1] - view[0], dur()); view = [clamp(view[0], 0, dur() - len), clamp(view[0], 0, dur() - len) + len]; }
-  offDirty = true; setPan();
-}
-function setPan() {
-  const d = dur(), len = view[1] - view[0];
-  $("pan").value = d > len ? Math.round(view[0] / (d - len) * 1000) : 0;
-  $("pan").disabled = d <= len + 1e-6;
-}
-$("pan").oninput = e => { const d = dur(), len = view[1] - view[0]; const a = e.target.value / 1000 * Math.max(0, d - len); view = [a, a + len]; offDirty = true; };
+const seek = t => { au.currentTime = Math.max(0, t); };
+const playSeg = i => { seek(segs[i].start_ms / 1000 * K); au.play(); };
 
-function renderWave() {
-  const w = cv.width, h = cv.height, o = off.getContext("2d");
-  o.fillStyle = "#0f1626"; o.fillRect(0, 0, w, h);
-  if (!data) return;
-  const spp = (view[1] - view[0]) * sr / w, step = Math.max(1, Math.floor(spp / 48)), mid = h / 2;
-  o.fillStyle = "#6fa8ff";
-  for (let x = 0; x < w; x++) {
-    const s0 = Math.floor(view[0] * sr + x * spp), s1 = Math.min(data.length - 1, Math.floor(view[0] * sr + (x + 1) * spp));
-    if (s0 >= data.length) break;
-    let mn = 1, mx = -1;
-    for (let i = s0; i <= s1; i += step) { const v = data[i]; if (v < mn) mn = v; if (v > mx) mx = v; }
-    if (mx < mn) mn = mx = 0;
-    o.fillRect(x, mid - mx * mid * .95, 1, Math.max(1, (mx - mn) * mid * .95));
-  }
-  o.fillStyle = "rgba(255,255,255,.15)"; o.fillRect(0, mid, w, 1);
-  offDirty = false;
+tx.addEventListener("click", e => {
+  const t = e.target; if (!t.dataset || t.dataset.i === undefined) return;
+  const i = +t.dataset.i;
+  if (t.classList.contains("idx")) { select(i, null, null); playSeg(i); }
+  else if (t.classList.contains("w")) select(i, +t.dataset.k, t.textContent);
+});
+tx.addEventListener("dblclick", e => {
+  if (e.target.classList.contains("w")) playSeg(+e.target.dataset.i);
+});
+cv.addEventListener("click", e => {
+  const r = cv.getBoundingClientRect(); seek((e.clientX - r.left) / r.width * DUR * K);
+});
+$("prev").onclick = () => playSeg(Math.max(0, (cur < 0 ? 0 : cur) - 1));
+$("next").onclick = () => playSeg(Math.min(segs.length - 1, (cur < 0 ? -1 : cur) + 1));
+$("spd").onchange = e => { au.playbackRate = +e.target.value; };
+au.addEventListener("play", () => { au.playbackRate = +$("spd").value; });
+
+function segAt(t) {  // t in timeline seconds
+  const ms = t * 1000;
+  for (let i = segs.length - 1; i >= 0; i--) if (segs[i].start_ms <= ms) return ms < segs[i].end_ms + 50 ? i : -1;
+  return -1;
 }
-function pos() {
-  if (!playing) return cursor;
-  return Math.min(playing.from + ac.currentTime - playing.t0, playing.end);
-}
+
 function draw() {
-  const w = cv.clientWidth; if (cv.width !== w) { cv.width = w; off.width = w; offDirty = true; }
-  if (off.height !== cv.height) off.height = cv.height;
-  if (offDirty) renderWave();
-  g.drawImage(off, 0, 0);
-  const h = cv.height, vs = view[1] - view[0];
-  g.fillStyle = "rgba(255,255,255,.6)"; g.font = "11px system-ui";
-  const st = [.05, .1, .2, .5, 1, 2, 5, 10, 15, 30, 60, 120, 300].find(s => vs / s <= 12) || 600;
-  for (let t = Math.ceil(view[0] / st) * st; t < view[1]; t += st) { const x = toX(t); g.fillRect(x, 0, 1, 8); g.fillText(fmt(t), x + 3, 18); }
-  if (sel) {
-    g.fillStyle = "rgba(255,170,0,.30)"; g.fillRect(toX(sel[0]), 0, toX(sel[1]) - toX(sel[0]), h);
-    g.fillStyle = "#ffb300"; g.fillRect(toX(sel[0]), 0, 1, h); g.fillRect(toX(sel[1]), 0, 1, h);
+  const W = cv.clientWidth, H = cv.height; if (cv.width !== W) cv.width = W;
+  g.clearRect(0, 0, W, H);
+  const dur = DUR || au.duration || 1;
+  const shade = (i, c) => { if (i < 0 || !segs[i]) return; g.fillStyle = c;
+    g.fillRect(segs[i].start_ms / 1000 / dur * W, 0, (segs[i].end_ms - segs[i].start_ms) / 1000 / dur * W, H); };
+  shade(cur, "rgba(80,140,255,.20)"); shade(selI, "rgba(255,170,0,.35)");
+  if (peaks) { g.fillStyle = "#6b7a99";
+    for (let x = 0; x < W; x++) { const p = peaks[Math.floor(x / W * peaks.length)], h = Math.max(1, p * H * .95);
+      g.fillRect(x, (H - h) / 2, 1, h); } }
+  g.fillStyle = "rgba(0,0,0,.22)";
+  segs.forEach(s => g.fillRect(Math.floor(s.start_ms / 1000 / dur * W), 0, 1, H));
+  g.fillStyle = "#e5384f"; g.fillRect(au.currentTime / K / dur * W, 0, 2, H);
+}
+
+setInterval(() => {
+  const i = segAt(au.currentTime / K);
+  if (i !== cur) {
+    document.querySelectorAll(".seg.cur").forEach(e => e.classList.remove("cur"));
+    cur = i;
+    if (i >= 0) {
+      const el = $("s" + i); el.classList.add("cur");
+      if ($("follow").checked && !au.paused)
+        tx.scrollTo({top: el.offsetTop - tx.offsetTop - tx.clientHeight / 3, behavior: "smooth"});
+    }
   }
-  g.fillStyle = "#ff4d6d"; g.fillRect(toX(pos()), 0, 2, h);
-  $("iDur").textContent = "Length " + fmt(dur()) + "  ·  Cursor " + fmt(pos());
-  $("iSel").textContent = sel ? "Selection " + fmt(sel[0]) + " → " + fmt(sel[1]) + " (" + (sel[1] - sel[0]).toFixed(2) + "s)" : "No selection";
-  $("iEd").textContent = "Edits: " + ops.length + (ops.length !== applied ? "  (not applied yet)" : "  (applied)");
-}
-setInterval(() => { if (data) draw(); }, 50);
+  draw();
+}, 100);
 
-function startPlay(from, to) {
-  stopPlay();
-  if (!data) return;
-  if (!ac) ac = new (window.AudioContext || window.webkitAudioContext)();
-  ac.resume();
-  const buf = ac.createBuffer(1, data.length, sr); buf.copyToChannel(data, 0);
-  const s = ac.createBufferSource(); s.buffer = buf; s.connect(ac.destination);
-  const end = to == null ? dur() : to;
-  if (end - from < 0.01) return;
-  s.start(0, from, end - from);
-  const p = {s, from, end, t0: ac.currentTime}; playing = p;
-  s.onended = () => { if (playing === p) { cursor = end >= dur() - .01 ? from : end; playing = null; } };
+async function computePeaks(url) {
+  try {
+    const buf = await (await fetch(url)).arrayBuffer();
+    const ac = new (window.AudioContext || window.webkitAudioContext)();
+    const ab = await ac.decodeAudioData(buf); ac.close();
+    const d = ab.getChannelData(0), N = 2000, step = Math.floor(d.length / N) || 1, out = new Float32Array(N);
+    let mx = 0.001;
+    for (let i = 0; i < N; i++) {
+      let m = 0;
+      for (let j = i * step; j < Math.min((i + 1) * step, d.length); j += Math.max(1, step >> 6)) m = Math.max(m, Math.abs(d[j]));
+      out[i] = m; mx = Math.max(mx, m);
+    }
+    for (let i = 0; i < N; i++) out[i] /= mx;
+    peaks = out;
+  } catch (e) { peaks = null; }
 }
-function stopPlay() {
-  if (!playing) return;
-  cursor = pos(); const s = playing.s; playing = null; s.onended = null; try { s.stop(); } catch (e) {}
-}
-$("bPlay").onclick = () => { if (playing) stopPlay(); else startPlay(cursor >= dur() - .01 ? 0 : cursor); };
-$("bStop").onclick = () => { stopPlay(); cursor = sel ? sel[0] : 0; };
-$("bPlaySel").onclick = () => { if (sel) startPlay(sel[0], sel[1]); };
 
-function del() {
-  if (!sel || sel[1] - sel[0] < 0.01) return;
-  ops.push([Math.round(sel[0] * 1000), Math.round(sel[1] * 1000)]); redo = [];
-  cursor = sel[0]; rebuild(true);
-}
-function trim() {
-  if (!sel) return;
-  const a = Math.round(sel[0] * 1000), b = Math.round(sel[1] * 1000), tot = Math.round(dur() * 1000);
-  if (b < tot) ops.push([b, tot]);
-  if (a > 0) ops.push([0, a]);
-  redo = []; cursor = 0; rebuild(false);
-}
-function undo() { if (ops.length) { redo.push(ops.pop()); rebuild(true); } }
-function redoF() { if (redo.length) { ops.push(redo.pop()); rebuild(true); } }
-$("bDel").onclick = del; $("bTrim").onclick = trim; $("bUndo").onclick = undo; $("bRedo").onclick = redoF;
-$("bAll").onclick = () => { sel = [0, dur()]; };
-$("bApply").onclick = () => {
-  applied = ops.length;
-  post("streamlit:setComponentValue", {dataType: "json", value: {ops: ops.map(o => [o[0], o[1]]), ver: ver, n: Date.now()}});
-};
-
-function zoom(t, f) {
-  const d = dur(), cur = view[1] - view[0], len = clamp(cur * f, 0.05, Math.max(d, 0.05));
-  const a = clamp(t - (t - view[0]) * (len / cur), 0, Math.max(0, d - len));
-  view = [a, a + len]; offDirty = true; setPan();
-}
-$("bZin").onclick = () => zoom((view[0] + view[1]) / 2, .5);
-$("bZout").onclick = () => zoom((view[0] + view[1]) / 2, 2);
-$("bZsel").onclick = () => { if (sel && sel[1] - sel[0] > .05) { view = [sel[0], sel[1]]; offDirty = true; setPan(); } };
-$("bFit").onclick = () => { view = [0, Math.max(dur(), .1)]; offDirty = true; setPan(); };
-cv.addEventListener("wheel", e => { e.preventDefault(); zoom(toT(e.clientX - cv.getBoundingClientRect().left), e.deltaY < 0 ? .8 : 1.25); }, {passive: false});
-
-cv.addEventListener("mousedown", e => {
-  const x = e.clientX - cv.getBoundingClientRect().left, t = clamp(toT(x), 0, dur());
-  if (sel && Math.abs(toX(sel[0]) - x) < 7) drag = {mode: "edge", fix: sel[1]};
-  else if (sel && Math.abs(toX(sel[1]) - x) < 7) drag = {mode: "edge", fix: sel[0]};
-  else drag = {mode: "new", a: t, x0: x, moved: false};
-  document.body.focus(); e.preventDefault();
-});
-window.addEventListener("mousemove", e => {
-  if (!drag) return;
-  const r = cv.getBoundingClientRect(), x = clamp(e.clientX - r.left, 0, r.width), t = clamp(toT(x), 0, dur());
-  if (drag.mode === "edge") sel = [Math.min(drag.fix, t), Math.max(drag.fix, t)];
-  else if (drag.moved || Math.abs(x - drag.x0) > 3) { drag.moved = true; sel = [Math.min(drag.a, t), Math.max(drag.a, t)]; }
-});
-window.addEventListener("mouseup", () => {
-  if (!drag) return;
-  if (drag.mode === "new" && !drag.moved) { sel = null; cursor = drag.a; if (playing) startPlay(drag.a); }
-  drag = null;
-});
-document.addEventListener("keydown", e => {
-  if (e.code === "Space") { e.preventDefault(); $("bPlay").click(); }
-  else if (e.key === "Delete" || e.key === "Backspace") { e.preventDefault(); del(); }
-  else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { e.preventDefault(); e.shiftKey ? redoF() : undo(); }
-  else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y") { e.preventDefault(); redoF(); }
-  else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") { e.preventDefault(); sel = [0, dur()]; }
+au.addEventListener("loadedmetadata", () => {
+  K = (isFinite(au.duration) && DUR > 0) ? au.duration / DUR : 1;
+  const off = Math.abs(au.duration - DUR);
+  if (off < 0.15) K = 1;
+  $("diag").textContent = off >= 0.15 ? "⚠ timing corrected (browser length differs by " + off.toFixed(1) + "s)" : "";
+  if (resumeT > 0) au.currentTime = Math.min(resumeT * K, au.duration);
+  if (resumePlay) au.play().catch(() => {});
 });
 
-async function load(url) {
-  const buf = await (await fetch(url)).arrayBuffer();
-  let c; try { c = new (window.AudioContext || window.webkitAudioContext)({sampleRate: 16000}); }
-  catch (e) { c = new (window.AudioContext || window.webkitAudioContext)(); }
-  const ab = await c.decodeAudioData(buf); c.close();
-  sr = ab.sampleRate; orig = ab.getChannelData(0).slice();
-  ops = []; redo = []; applied = 0; cursor = 0; rebuild(false);
-}
 window.addEventListener("message", ev => {
   const m = ev.data; if (!m || m.type !== "streamlit:render") return;
-  post("streamlit:setFrameHeight", {height: 400});
-  if (m.args.ver !== ver) { ver = m.args.ver; load(m.args.audio); }
+  const a = m.args, key = JSON.stringify(a.segments);
+  DUR = (a.dur_ms || 0) / 1000;
+  if (key !== segKey) { segs = a.segments; segKey = key; build(); }
+  if (a.ver !== ver) {
+    const first = ver === null;
+    resumeT = first ? 0 : au.currentTime / K; resumePlay = first ? false : !au.paused;
+    ver = a.ver; au.src = a.audio; peaks = null; computePeaks(a.audio);
+  }
+  post("streamlit:setFrameHeight", {height: 700});
 });
 post("streamlit:componentReady", {apiVersion: 1});
 </script></body></html>

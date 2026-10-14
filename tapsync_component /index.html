@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root { color-scheme: light dark; --bd:#8884; --acc:#e8590c; --ok:#2f9e44; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:4px; font:14px system-ui,sans-serif; }
+  audio { width:100%; }
+  .row { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin:6px 0; }
+  button { padding:7px 12px; border:1px solid var(--bd); border-radius:8px; background:#8881; color:inherit;
+           font:inherit; cursor:pointer; }
+  button:hover { background:#8883; }
+  button.big { font-size:15px; font-weight:600; padding:10px 14px; }
+  #bStart { border-color:var(--ok); } #bEnd { border-color:var(--acc); } #bBound { border-color:#4263eb; }
+  #bSend { background:var(--ok); color:#fff; border-color:var(--ok); font-weight:600; }
+  input[type=number], select { padding:5px; border:1px solid var(--bd); border-radius:6px; background:transparent; color:inherit; }
+  input[type=number] { width:70px; }
+  .cur { border:2px solid var(--acc); border-radius:10px; padding:10px 12px; margin-top:6px; }
+  .cur .t { font-size:20px; line-height:1.7; }
+  .nxt { opacity:.6; padding:4px 12px; font-size:15px; }
+  .meta { font-size:12px; opacity:.75; }
+  #list { max-height:170px; overflow:auto; border:1px solid var(--bd); border-radius:8px; margin-top:6px; }
+  .it { display:flex; gap:8px; padding:4px 8px; cursor:pointer; border-bottom:1px solid var(--bd); font-size:13px; }
+  .it:hover { background:#8882; } .it.sel { background:#e8590c22; }
+  .it .n { width:44px; flex:none; opacity:.7; } .it .x { flex:1; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+  .it .s { flex:none; font-variant-numeric:tabular-nums; }
+  .done { color:var(--ok); }
+  kbd { border:1px solid var(--bd); border-radius:4px; padding:0 4px; font-size:11px; }
+</style>
+</head>
+<body>
+<audio id="au" controls preload="auto"></audio>
+<div class="row">
+  <button id="bBack" title="Left arrow">⏪ 3s</button>
+  <button id="bPlay" title="P">⏯ Play / pause</button>
+  <button id="bFwd" title="Right arrow">3s ⏩</button>
+  <label>Speed <select id="spd"><option>0.75</option><option selected>1</option><option>1.25</option><option>1.5</option></select></label>
+  <label title="You press a little after you hear it. This much is subtracted from every tap.">Reaction offset (ms)
+    <input id="off" type="number" value="200" min="0" max="800" step="50"></label>
+  <span class="meta" id="clock"></span>
+</div>
+
+<div class="cur"><div class="meta" id="curMeta"></div><div class="t" id="cur" dir="auto"></div></div>
+<div class="nxt" id="nxt" dir="auto"></div>
+
+<div class="row">
+  <button class="big" id="bStart">▶ Sentence starts <kbd>S</kbd></button>
+  <button class="big" id="bEnd">■ Sentence ends <kbd>E</kbd></button>
+  <button class="big" id="bBound" title="No pause between them: marks the end of this one and the start of the next">⏭ Ends + next starts <kbd>B</kbd></button>
+  <button id="bSkip">Skip <kbd>K</kbd></button>
+  <button id="bUndo">↶ Undo <kbd>Z</kbd></button>
+</div>
+
+<div id="list"></div>
+<div class="row">
+  <button id="bSend">✅ Done – send taps to the app</button>
+  <span class="meta" id="msg">Tip: press Start when you hear the first word, End after the last word. Clicking a row jumps to that sentence.</span>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const au = $("au");
+let T = [], idx = 0, taps = {}, hist = [], runId = null, sig = "", audioVer = null, sends = 0;
+
+// ---- Streamlit component protocol (no build step needed) ----
+function post(type, data) { window.parent.postMessage(Object.assign({isStreamlitMessage: true, type}, data), "*"); }
+function height() { post("streamlit:setFrameHeight", {height: document.body.scrollHeight + 12}); }
+window.addEventListener("message", e => {
+  if (e.data && e.data.type === "streamlit:render") render(e.data.args || {});
+});
+post("streamlit:componentReady", {apiVersion: 1});
+
+function render(a) {
+  if (a.ver !== audioVer && a.audio) { audioVer = a.ver; au.src = a.audio; }
+  const newSig = JSON.stringify((a.targets || []).map(t => t.id));
+  if (a.run !== runId || newSig !== sig) {          // new batch -> start fresh
+    runId = a.run; sig = newSig; T = a.targets || []; idx = 0; taps = {}; hist = [];
+    $("msg").textContent = T.length ? "Tip: press Start when you hear the first word, End after the last word. Clicking a row jumps to that sentence."
+                                    : "No sentences selected.";
+    seekTo(0);
+  }
+  draw();
+}
+
+function seekTo(i) {
+  if (!T[i]) return;
+  const t = Math.max(0, (T[i].start_ms - 3000) / 1000);
+  const go = () => { au.currentTime = t; };
+  if (au.readyState >= 1) go(); else au.addEventListener("loadedmetadata", go, {once: true});
+}
+
+const fmt = ms => (ms == null ? "–" : (ms / 1000).toFixed(2) + "s");
+function draw() {
+  const c = T[idx];
+  $("curMeta").textContent = c ? `Sentence #${c.id + 1}  ·  ${idx + 1} of ${T.length}` :
+                                 (T.length ? "All selected sentences are done – press “Done”." : "");
+  $("cur").textContent = c ? c.text : "";
+  $("nxt").textContent = T[idx + 1] ? "Next: " + T[idx + 1].text : "";
+  $("list").innerHTML = T.map((t, i) => {
+    const k = taps[t.id] || {};
+    return `<div class="it ${i === idx ? "sel" : ""}" data-i="${i}"><span class="n">#${t.id + 1}</span>` +
+           `<span class="x" dir="auto">${esc(t.text)}</span>` +
+           `<span class="s ${k.s != null && k.e != null ? "done" : ""}">${fmt(k.s)} → ${fmt(k.e)}</span></div>`;
+  }).join("");
+  const sel = $("list").querySelector(".sel"); if (sel) sel.scrollIntoView({block: "nearest"});
+  height();
+}
+const esc = s => s.replace(/[&<>]/g, ch => ({"&": "&amp;", "<": "&lt;", ">": "&gt;"}[ch]));
+
+// ---- tapping ----
+const now = () => Math.max(0, Math.round(au.currentTime * 1000 - (+$("off").value || 0)));
+function snapshot() { hist.push({taps: JSON.parse(JSON.stringify(taps)), idx}); }
+function put(i, key, val) { const id = T[i].id; (taps[id] = taps[id] || {})[key] = val; }
+function advance() {
+  const prev = T[idx]; idx = Math.min(idx + 1, T.length);
+  if (T[idx] && prev && T[idx].id !== prev.id + 1) seekTo(idx);   // next target is somewhere else
+}
+function doStart() { if (!T[idx]) return; snapshot(); put(idx, "s", now()); draw(); }
+function doEnd()   { if (!T[idx]) return; snapshot(); put(idx, "e", now()); advance(); draw(); }
+function doBound() {
+  if (!T[idx]) return; snapshot(); const t = now(); put(idx, "e", t);
+  const contiguous = T[idx + 1] && T[idx + 1].id === T[idx].id + 1;
+  advance(); if (contiguous) put(idx, "s", t);
+  draw();
+}
+function doSkip() { if (!T[idx]) return; snapshot(); advance(); draw(); }
+function doUndo() { const h = hist.pop(); if (h) { taps = h.taps; idx = h.idx; draw(); } }
+
+$("bStart").onclick = doStart; $("bEnd").onclick = doEnd; $("bBound").onclick = doBound;
+$("bSkip").onclick = doSkip;  $("bUndo").onclick = doUndo;
+$("bBack").onclick = () => { au.currentTime = Math.max(0, au.currentTime - 3); };
+$("bFwd").onclick = () => { au.currentTime += 3; };
+$("bPlay").onclick = () => { au.paused ? au.play() : au.pause(); };
+$("spd").onchange = () => { au.playbackRate = +$("spd").value; };
+$("list").onclick = e => {
+  const r = e.target.closest(".it"); if (!r) return;
+  idx = +r.dataset.i; seekTo(idx); draw();
+};
+$("bSend").onclick = () => {
+  const n = Object.keys(taps).length;
+  post("streamlit:setComponentValue", {dataType: "json", value: {run: runId, taps, n: ++sends}});
+  $("msg").textContent = `Sent ${n} sentence(s) ✓ – now press “Apply taps” below the player.`;
+};
+au.ontimeupdate = () => { $("clock").textContent = au.currentTime.toFixed(2) + "s"; };
+
+document.addEventListener("keydown", e => {
+  if (["INPUT", "SELECT", "TEXTAREA"].includes(e.target.tagName) || e.ctrlKey || e.metaKey) return;
+  const k = e.key.toLowerCase();
+  const map = {s: doStart, e: doEnd, b: doBound, k: doSkip, z: doUndo,
+               p: () => $("bPlay").click(), arrowleft: () => $("bBack").click(), arrowright: () => $("bFwd").click()};
+  if (map[k]) { e.preventDefault(); map[k](); }
+});
+window.addEventListener("load", () => { window.focus(); height(); });
+</script>
+</body>
+</html>

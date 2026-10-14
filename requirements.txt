@@ -1,0 +1,6 @@
+streamlit>=1.37
+google-genai
+pydub
+librosa
+numpy
+faster-whisper
